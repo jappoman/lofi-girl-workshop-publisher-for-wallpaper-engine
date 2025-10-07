@@ -13,8 +13,9 @@ from the bundle, queries the CMS directly, and collects all mp4 assets.
 import json
 import re
 import sys
-from typing import Dict, Iterable, List
-from urllib.parse import urljoin
+from pathlib import Path
+from typing import Dict, Iterable, List, Set
+from urllib.parse import unquote, urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -22,6 +23,7 @@ from bs4 import BeautifulSoup
 BASE_URL = "https://lofistudio.com"
 PROJECTS_URL = f"{BASE_URL}/projects"
 OUTFILE = "mp4_links.txt"
+DOWNLOAD_DIR = Path("mp4_assets")
 
 HEADERS = {
     "User-Agent": (
@@ -160,6 +162,86 @@ def collect_mp4_urls(project: Dict[str, object], cms_base: str) -> List[str]:
     return urls
 
 
+def filename_from_url(url: str) -> str:
+    """Derive a filesystem-safe filename for the given media URL."""
+    parsed = urlparse(url)
+    raw_name = Path(parsed.path).name
+    if not raw_name:
+        raw_name = "asset.mp4"
+
+    decoded = unquote(raw_name)
+    sanitized = re.sub(r"[^\w.\-]", "_", decoded)
+    sanitized = sanitized.strip("._") or "asset.mp4"
+
+    if not sanitized.lower().endswith(".mp4"):
+        sanitized += ".mp4"
+
+    return sanitized
+
+
+def resolve_destination(
+    filename: str, used_names: Set[str], outdir: Path
+) -> Path:
+    """Ensure each download path is unique to avoid overwriting files."""
+    stem = Path(filename).stem or "asset"
+    ext = Path(filename).suffix or ".mp4"
+
+    candidate = filename
+    counter = 1
+    while candidate in used_names or (outdir / candidate).exists():
+        candidate = f"{stem}-{counter}{ext}"
+        counter += 1
+
+    used_names.add(candidate)
+    return outdir / candidate
+
+
+def download_mp4_assets(
+    session: requests.Session, urls: Iterable[str], outdir: Path
+) -> Dict[str, int]:
+    """Download each MP4 to disk, skipping files that already exist."""
+    outdir.mkdir(parents=True, exist_ok=True)
+    used_names: Set[str] = set()
+    stats = {"downloaded": 0, "skipped": 0, "failed": 0}
+
+    for url in urls:
+        filename = filename_from_url(url)
+        base_destination = outdir / filename
+
+        if filename not in used_names and base_destination.exists():
+            print(f"[i]   -> Skipping existing file {base_destination}", file=sys.stderr)
+            used_names.add(filename)
+            stats["skipped"] += 1
+            continue
+
+        destination = resolve_destination(filename, used_names, outdir)
+
+        if destination.exists():
+            print(f"[i]   -> Skipping existing file {destination}", file=sys.stderr)
+            stats["skipped"] += 1
+            continue
+
+        tmp_path = destination.with_suffix(destination.suffix + ".part")
+        print(f"[i]   -> Downloading {destination.name}", file=sys.stderr)
+
+        try:
+            with session.get(url, stream=True, timeout=120) as resp:
+                resp.raise_for_status()
+                with tmp_path.open("wb") as fh:
+                    for chunk in resp.iter_content(chunk_size=1024 * 1024):
+                        if chunk:
+                            fh.write(chunk)
+            tmp_path.replace(destination)
+            stats["downloaded"] += 1
+        except Exception as exc:  # noqa: BLE001 - surfaced to user
+            if tmp_path.exists():
+                tmp_path.unlink()
+            print(f"[!]   -> Failed to download {url}: {exc}", file=sys.stderr)
+            stats["failed"] += 1
+
+    return stats
+
+
 def main() -> int:
     session = requests.Session()
     session.headers.update(HEADERS)
@@ -214,6 +296,19 @@ def main() -> int:
             fh.write(url + "\n")
 
     print(f"\n[i] Saved {len(results)} mp4 URLs to {OUTFILE}", file=sys.stderr)
+
+    print(f"[i] Downloading MP4 assets to {DOWNLOAD_DIR.resolve()}", file=sys.stderr)
+    stats = download_mp4_assets(session, results, DOWNLOAD_DIR)
+    print(
+        "[i] Downloads complete: "
+        f"{stats['downloaded']} new, {stats['skipped']} skipped, "
+        f"{stats['failed']} failed",
+        file=sys.stderr,
+    )
+
+    if stats["failed"] and stats["downloaded"] == 0:
+        return 1
+
     return 0
 
 if __name__ == "__main__":
