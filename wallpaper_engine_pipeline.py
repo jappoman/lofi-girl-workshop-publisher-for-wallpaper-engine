@@ -264,7 +264,13 @@ if ($null -eq $Selected) {{
     throw "Wallpaper not found. Use -List to see available IDs."
 }}
 
-$Args = @("-control", "openWallpaper", "-file", $Selected.path)
+$ProjectPath = Join-Path (Split-Path -Parent $ManifestPath) ("workshop\\projects\\" + $Selected.id)
+if (Test-Path -LiteralPath $ProjectPath) {{
+    $WallpaperPath = $ProjectPath
+}} else {{
+    $WallpaperPath = $Selected.path
+}}
+$Args = @("-control", "openWallpaper", "-file", $WallpaperPath)
 if ($Monitor -ge 0) {{
     $Args += @("-monitor", "$Monitor")
 }}
@@ -439,6 +445,43 @@ def project_json_for(item: Dict[str, object]) -> Dict[str, object]:
     }
 
 
+def stage_workshop_video(source_video: Path, project_dir: Path, item: Dict[str, object]) -> Path:
+    """Stage a Workshop-compatible MP4 and return its project-relative path.
+
+    Wallpaper Engine can open several formats locally, but Workshop video
+    wallpapers should be MP4 files. Keeping this conversion at the packaging
+    boundary also leaves the downloaded source assets untouched.
+    """
+    project_video = project_dir / f"{Path(str(item['filename'])).stem}.mp4"
+    if source_video.suffix.lower() == ".mp4":
+        shutil.copy2(source_video, project_video)
+        return project_video
+
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(source_video),
+            "-map",
+            "0:v:0",
+            "-map",
+            "0:a?",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-movflags",
+            "+faststart",
+            str(project_video),
+        ],
+        check=True,
+    )
+    return project_video
+
+
 def load_workshop_overrides(path: Path) -> Dict[str, Dict[str, str]]:
     if not path.exists():
         return {}
@@ -489,8 +532,7 @@ def prepare_workshop(args: argparse.Namespace) -> int:
         project_dir.mkdir(parents=True, exist_ok=True)
 
         source_video = Path(item["path"])
-        project_video = project_dir / item["filename"]
-        shutil.copy2(source_video, project_video)
+        project_video = stage_workshop_video(source_video, project_dir, item)
 
         preview_file = project_dir / "preview.jpg"
         preview_url = item_override.get("preview_url", "")
@@ -506,6 +548,7 @@ def prepare_workshop(args: argparse.Namespace) -> int:
         generate_screenshot(source_video, screenshot_file)
 
         project_json = project_json_for(item)
+        project_json["file"] = project_video.name
         if item_override.get("title"):
             project_json["title"] = item_override["title"]
         if item_override.get("description"):
@@ -707,12 +750,14 @@ def apply_wallpaper(args: argparse.Namespace) -> int:
         raise FileNotFoundError(f"Wallpaper Engine executable not found: {wallpaper_engine_exe}")
 
     selected = select_wallpaper(manifest, args.name, args.random)
+    staged_project = args.manifest.parent / "workshop" / "projects" / str(selected["id"])
+    wallpaper_path = staged_project if staged_project.exists() else Path(str(selected["path"]))
     command = [
         str(wallpaper_engine_exe),
         "-control",
         "openWallpaper",
         "-file",
-        selected["path"],
+        str(wallpaper_path),
     ]
     if args.monitor >= 0:
         command.extend(["-monitor", str(args.monitor)])
