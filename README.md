@@ -42,7 +42,7 @@ This writes:
 - `wallpaper_engine_build/workshop/upload-all.ps1`: sequential uploader
 - `tools/steamcmd/steamcmd.exe`: local SteamCMD downloaded from Valve
 
-Generated Workshop items default to `visibility = 2` (private).
+The `publish-workshop.ps1` deploy shortcut defaults to `visibility = 0` (public) after staging. Use `-Private` for a private test upload.
 
 ## Upload To Steam Workshop
 
@@ -60,16 +60,16 @@ For this repo, there is also a shortcut configured for `jappoman`:
 
 This shortcut stages the projects, then uploads missing Workshop items and updates already published items when their staged title, description, preview, or project content changed. Existing `publishedfileid` values are preserved, so rerunning the shortcut updates existing items instead of creating duplicates. Successful upload signatures are stored in `wallpaper_engine_build/workshop/upload-state.json`.
 
-The uploader waits between items (`600s` by default) and retries Steam rate-limit failures with a minimum 10-minute backoff. Steam does not publish a fixed cooldown value; this conservative delay avoids immediate repeated attempts. To publish or update only one wallpaper for a quick test:
+The uploader waits between items (`300s` by default) and retries Steam rate-limit failures with a minimum 5-minute backoff. Steam does not publish a fixed cooldown value; this is the shortest interval verified in this account's current queue. To publish or update only one wallpaper for a quick test:
 
 ```powershell
 .\publish-workshop.ps1 -Only bossa
 ```
 
-To stage/upload as public instead of private:
+To stage/upload privately for a test:
 
 ```powershell
-.\publish-workshop.ps1 -Public
+.\publish-workshop.ps1 -Private
 ```
 
 Or use the generated PowerShell script directly:
@@ -78,7 +78,7 @@ Or use the generated PowerShell script directly:
 .\wallpaper_engine_build\workshop\upload-all.ps1 -SteamUser YOUR_STEAM_USERNAME -SteamCmd ".\tools\steamcmd\steamcmd.exe"
 ```
 
-SteamCMD may prompt for Steam Guard. The shortcut waits between new items (`600s` by default) to reduce friction with Steam rate limits.
+SteamCMD may prompt for Steam Guard. The shortcut waits between new items (`300s` by default) to reduce friction with Steam rate limits.
 
 The Bossa item uses the project's dedicated `Bossa_Lofi.webp` cover as its Workshop preview and converts it to a compressed JPEG during staging.
 
@@ -123,7 +123,7 @@ python wallpaper_engine_pipeline.py prepare-workshop
 
 ## Visibility And Rights
 
-The generated VDF files are private by default. Change visibility to public only if you have the rights or permission to publish the source media on Steam Workshop.
+The low-level Python staging command still defaults to private. The deploy shortcut publishes publicly by default; use `-Private` when testing. Change visibility to public only if you have the rights or permission to publish the source media on Steam Workshop.
 
 Steam visibility values:
 - `0`: Public

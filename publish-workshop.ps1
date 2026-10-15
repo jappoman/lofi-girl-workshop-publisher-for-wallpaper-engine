@@ -1,17 +1,19 @@
 param(
     [switch]$Public,
+    [switch]$Private,
     [string]$Only = "",
-    [int]$DelaySeconds = 600,
-    [int]$RateLimitDelaySeconds = 600,
+    [int]$DelaySeconds = 300,
+    [int]$RateLimitDelaySeconds = 300,
     [int]$MaxRetries = 6
 )
 
 $ErrorActionPreference = "Stop"
 
-$VisibilityArgs = @()
-if ($Public) {
-    $VisibilityArgs = @("--visibility", "0")
+if ($Public -and $Private) {
+    throw "Use either -Public or -Private, not both."
 }
+$Visibility = if ($Private) { "2" } else { "0" }
+$VisibilityArgs = @("--visibility", $Visibility)
 
 $SteamUser = "jappoman"
 $SteamCmd = Join-Path $PSScriptRoot "tools\steamcmd\steamcmd.exe"
