@@ -35,4 +35,10 @@ Thumbs.db
 
 # Project outputs
 mp4_links.txt
+wallpaper_links.txt
+wallpaper_metadata.json
+wallpaper_engine_build/
+tools/steamcmd/
 *.mp4
+*.mov
+*.webm
