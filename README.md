@@ -60,6 +60,8 @@ For this repo, there is also a shortcut configured for `jappoman`:
 
 This shortcut stages the projects, then uploads missing Workshop items and updates already published items when their staged title, description, preview, or project content changed. Existing `publishedfileid` values are preserved, so rerunning the shortcut updates existing items instead of creating duplicates. Successful upload signatures are stored in `wallpaper_engine_build/workshop/upload-state.json`.
 
+Published Workshop IDs are kept in the tracked `workshop_overrides.json` file. This makes the repository the source of truth for deployments, including from a clean checkout; the generated build directory and upload state are only local artifacts/cache.
+
 The uploader waits between items (`300s` by default) and retries Steam rate-limit failures with a minimum 5-minute backoff. Steam does not publish a fixed cooldown value; this is the shortest interval verified in this account's current queue. To publish or update only one wallpaper for a quick test:
 
 ```powershell
