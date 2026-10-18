@@ -38,6 +38,14 @@ DEFAULT_STEAMCMD_DIR = Path("tools") / "steamcmd"
 DEFAULT_STEAMCMD_EXE = DEFAULT_STEAMCMD_DIR / "steamcmd.exe"
 
 
+def output_is_current(output_path: Path, source_path: Path) -> bool:
+    """Return whether a generated artifact can be reused for this source."""
+    try:
+        return output_path.is_file() and output_path.stat().st_mtime >= source_path.stat().st_mtime
+    except OSError:
+        return False
+
+
 def run_ffprobe(path: Path) -> Dict[str, object]:
     proc = subprocess.run(
         [
@@ -453,6 +461,10 @@ def stage_workshop_video(source_video: Path, project_dir: Path, item: Dict[str, 
     boundary also leaves the downloaded source assets untouched.
     """
     project_video = project_dir / f"{Path(str(item['filename'])).stem}.mp4"
+    if output_is_current(project_video, source_video):
+        print(f"[i]   -> Reusing cached conversion {project_video}")
+        return project_video
+
     if source_video.suffix.lower() == ".mp4":
         shutil.copy2(source_video, project_video)
         return project_video
@@ -536,16 +548,22 @@ def prepare_workshop(args: argparse.Namespace) -> int:
 
         preview_file = project_dir / "preview.jpg"
         preview_url = item_override.get("preview_url", "")
-        try:
-            if preview_url:
-                download_cover_preview(preview_url, preview_file)
-            else:
+        if output_is_current(preview_file, source_video):
+            print(f"[i]   -> Reusing cached preview {preview_file}")
+        else:
+            try:
+                if preview_url:
+                    download_cover_preview(preview_url, preview_file)
+                else:
+                    generate_preview(source_video, preview_file)
+            except Exception as exc:  # noqa: BLE001 - video frame is a safe fallback
+                print(f"[!] Cover download failed for {item['id']}: {exc}; using video frame.")
                 generate_preview(source_video, preview_file)
-        except Exception as exc:  # noqa: BLE001 - video frame is a safe fallback
-            print(f"[!] Cover download failed for {item['id']}: {exc}; using video frame.")
-            generate_preview(source_video, preview_file)
         screenshot_file = project_dir / "screenshot.jpg"
-        generate_screenshot(source_video, screenshot_file)
+        if not output_is_current(screenshot_file, source_video):
+            generate_screenshot(source_video, screenshot_file)
+        else:
+            print(f"[i]   -> Reusing cached screenshot {screenshot_file}")
 
         project_json = project_json_for(item)
         project_json["file"] = project_video.name
