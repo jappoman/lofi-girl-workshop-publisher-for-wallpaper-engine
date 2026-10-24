@@ -97,7 +97,8 @@ function Write-UploadState {
 function Write-DeploymentReport {
     param(
         [object[]]$Items,
-        [hashtable]$State
+        [hashtable]$State,
+        [hashtable]$RunResults = @{}
     )
 
     $ReportItems = foreach ($Item in $Items) {
@@ -111,12 +112,24 @@ function Write-DeploymentReport {
         } else {
             $Status = "needs-upload"
         }
-        [ordered]@{
+        $ReportItem = [ordered]@{
             slug = $Item.BaseName
             publishedfileid = if ($PublishedFileId) { $PublishedFileId } else { "0" }
             signature = $Signature
             status = $Status
         }
+
+        if ($RunResults.ContainsKey($Item.BaseName)) {
+            $Result = $RunResults[$Item.BaseName]
+            $ReportItem.last_run = [ordered]@{
+                status = $Result.Status
+                attempts = $Result.Attempts
+                message = $Result.Message
+                completed_at = $Result.CompletedAt
+            }
+        }
+
+        $ReportItem
     }
 
     [ordered]@{
@@ -136,8 +149,9 @@ function Invoke-WorkshopUpload {
             $BeforeLog = Get-Content -LiteralPath $ConsoleLog -Raw
         }
 
-        & $SteamCmd +login $SteamUser +workshop_build_item $VdfPath +quit
+        $SteamOutput = & $SteamCmd +login $SteamUser +workshop_build_item $VdfPath +quit 2>&1
         $ExitCode = $LASTEXITCODE
+        $SteamOutput | ForEach-Object { Write-Host $_ }
 
         $AttemptText = ""
         if (Test-Path -LiteralPath $ConsoleLog) {
@@ -149,12 +163,20 @@ function Invoke-WorkshopUpload {
             }
         }
 
-        if ($ExitCode -eq 0) {
-            return "Success"
+        if ($AttemptText -match "Access Denied") {
+            return [pscustomobject]@{
+                Status = "AccessDenied"
+                Attempts = $Attempt
+                Message = "Steam denied the update; it may still be under automated review."
+            }
         }
 
-        if ($AttemptText -match "Access Denied") {
-            return "AccessDenied"
+        if ($ExitCode -eq 0) {
+            return [pscustomobject]@{
+                Status = "Success"
+                Attempts = $Attempt
+                Message = "SteamCMD completed successfully."
+            }
         }
 
         if ($AttemptText -match "Rate Limit Exceeded" -and $Attempt -lt $MaxRetries) {
@@ -165,10 +187,18 @@ function Invoke-WorkshopUpload {
         }
 
         if ($AttemptText -match "Rate Limit Exceeded") {
-            throw "Steam rate limit reached for $VdfPath"
+            return [pscustomobject]@{
+                Status = "RateLimitExceeded"
+                Attempts = $Attempt
+                Message = "Steam rate limit persisted after $MaxRetries attempts."
+            }
         }
 
-        throw "SteamCMD failed for $VdfPath"
+        return [pscustomobject]@{
+            Status = "Failed"
+            Attempts = $Attempt
+            Message = "SteamCMD exited with code $ExitCode."
+        }
     }
 }
 
@@ -182,6 +212,11 @@ if (-not (Test-Path -LiteralPath $SteamCmd)) {
 }
 
 $UploadState = Read-UploadState
+$RunResults = @{}
+$SuccessCount = 0
+$SkippedCount = 0
+$PendingCount = 0
+$FailedCount = 0
 $Vdfs = Get-ChildItem -LiteralPath $VdfDir -Filter "*.vdf" | Sort-Object Name
 if ($Only) {
     $Vdfs = $Vdfs | Where-Object { $_.BaseName -eq $Only }
@@ -190,7 +225,7 @@ if ($Only) {
     }
 }
 
-Write-DeploymentReport -Items $Vdfs -State $UploadState
+Write-DeploymentReport -Items $Vdfs -State $UploadState -RunResults $RunResults
 
 foreach ($Vdf in $Vdfs) {
     $PublishedFileId = Get-VdfField $Vdf.FullName "publishedfileid"
@@ -198,25 +233,72 @@ foreach ($Vdf in $Vdfs) {
     $PreviousSignature = $UploadState[$Vdf.BaseName]
 
     if ($PublishedFileId -and $PublishedFileId -ne "0" -and $PreviousSignature -eq $Signature) {
-        Write-Host "Skipping unchanged $($Vdf.Name): $PublishedFileId"
+        $RunResults[$Vdf.BaseName] = [pscustomobject]@{
+            Status = "Skipped"
+            Attempts = 0
+            Message = "Unchanged; already synchronized."
+            CompletedAt = (Get-Date).ToUniversalTime().ToString("o")
+        }
+        $SkippedCount++
+        Write-Host "[SKIP] $($Vdf.Name): unchanged (Workshop ID $PublishedFileId)"
+        Write-DeploymentReport -Items $Vdfs -State $UploadState -RunResults $RunResults
         continue
     }
 
     $UploadResult = Invoke-WorkshopUpload $Vdf.FullName
-    if ($UploadResult -eq "AccessDenied") {
+    if ($UploadResult.Status -eq "AccessDenied") {
+        $RunResults[$Vdf.BaseName] = [pscustomobject]@{
+            Status = "PendingReview"
+            Attempts = $UploadResult.Attempts
+            Message = $UploadResult.Message
+            CompletedAt = (Get-Date).ToUniversalTime().ToString("o")
+        }
+        $PendingCount++
         if ($PublishedFileId -and $PublishedFileId -ne "0") {
-            Write-Host "Steam denied updating $($Vdf.Name). It may still be under automated review; leaving it pending for the next run."
+            Write-Host "[PENDING/REVIEW] $($Vdf.Name): update denied after $($UploadResult.Attempts) attempt(s); will retry next run."
+            Write-DeploymentReport -Items $Vdfs -State $UploadState -RunResults $RunResults
             continue
         }
-        throw "Steam denied creating $($Vdf.FullName)."
+        Write-Host "[PENDING/REVIEW] $($Vdf.Name): creation denied after $($UploadResult.Attempts) attempt(s); will retry next run."
+        Write-DeploymentReport -Items $Vdfs -State $UploadState -RunResults $RunResults
+        continue
+    }
+
+    if ($UploadResult.Status -ne "Success") {
+        $RunResults[$Vdf.BaseName] = [pscustomobject]@{
+            Status = $UploadResult.Status
+            Attempts = $UploadResult.Attempts
+            Message = $UploadResult.Message
+            CompletedAt = (Get-Date).ToUniversalTime().ToString("o")
+        }
+        $FailedCount++
+        Write-Host "[FAILED] $($Vdf.Name): $($UploadResult.Message)"
+        Write-DeploymentReport -Items $Vdfs -State $UploadState -RunResults $RunResults
+        continue
     }
 
     $UploadState[$Vdf.BaseName] = Get-UploadSignature $Vdf.FullName
+    $RunResults[$Vdf.BaseName] = [pscustomobject]@{
+        Status = "Success"
+        Attempts = $UploadResult.Attempts
+        Message = $UploadResult.Message
+        CompletedAt = (Get-Date).ToUniversalTime().ToString("o")
+    }
+    $SuccessCount++
+    Write-Host "[SUCCESS] $($Vdf.Name): upload/update completed after $($UploadResult.Attempts) attempt(s). Workshop ID $((Get-VdfField $Vdf.FullName 'publishedfileid'))"
     Write-UploadState $UploadState
-    Write-DeploymentReport -Items $Vdfs -State $UploadState
+    Write-DeploymentReport -Items $Vdfs -State $UploadState -RunResults $RunResults
 
     if ($DelaySeconds -gt 0 -and $Vdf.FullName -ne $Vdfs[-1].FullName) {
         Write-Host "Waiting $DelaySeconds seconds before the next item..."
         Start-Sleep -Seconds $DelaySeconds
     }
+}
+
+Write-Host ""
+Write-Host "Deployment summary: $SuccessCount succeeded, $SkippedCount skipped, $PendingCount pending review, $FailedCount failed."
+Write-Host "Detailed report: $DeployReportPath"
+
+if ($FailedCount -gt 0) {
+    exit 1
 }
